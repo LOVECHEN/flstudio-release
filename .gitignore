@@ -1,0 +1,6 @@
+.DS_Store
+*.dmg
+*.exe
+SHA256SUMS.txt
+# 本地机密文档（记录 Secret 真实值），绝不推送到公开仓库
+SECRETS.local.md

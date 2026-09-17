@@ -1,0 +1,69 @@
+name: mirror
+
+on:
+  schedule:
+    - cron: '23 */6 * * *'   # 每 6 小时检查官方安装器重定向
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mirror
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 官方安装器是「稳定重定向 → 带版本号的直链」，HEAD 跟随重定向即可白嫖版本号，
+      # 无需下载 1GB 正文。mac / win 各自独立 build 号，按 tag 前缀分轨。
+      # 两条 redirect 源 URL 存放在仓库 Secret（REDIRECT_MAC / REDIRECT_WIN），不写进仓库。
+
+      - name: Mirror · macOS (dmg)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REDIRECT: ${{ secrets.REDIRECT_MAC }}
+          TRACK: mac
+          PLATFORM: macOS
+          LATEST: 'true'          # /releases/latest 指向最新 macOS 版
+        run: bash .github/scripts/mirror-one.sh
+
+      - name: Mirror · Windows (exe)
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REDIRECT: ${{ secrets.REDIRECT_WIN }}
+          TRACK: win
+          PLATFORM: Windows x64
+          LATEST: 'false'
+        run: bash .github/scripts/mirror-one.sh
+
+      # 刷新清单，兼作保活（防止定时任务被 GitHub 60 天休眠）
+      - name: Refresh MIRRORED.md manifest (keep-alive)
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          {
+            echo "# 已归档版本"
+            echo
+            echo "> 由 mirror workflow 自动刷新 · $(date -u '+%Y-%m-%d %H:%M UTC')"
+            echo
+            echo "| 平台 | 标题 | tag | 发布(UTC) |"
+            echo "|---|---|---|---|"
+            gh release list -R "$GITHUB_REPOSITORY" --limit 300 --json tagName,name,createdAt \
+              --jq 'sort_by(.tagName)|reverse|.[]|"| \(.tagName|split("-")[0]) | \(.name) | \(.tagName) | \(.createdAt[0:16]|sub("T";" ")) |"'
+          } > MIRRORED.md
+          git add MIRRORED.md
+          if git diff --cached --quiet -- MIRRORED.md; then   # 含首次未跟踪文件的判定
+            echo "MIRRORED.md 无变化"
+          else
+            git config user.name  "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -m "chore: refresh mirrored manifest" && git push
+          fi
