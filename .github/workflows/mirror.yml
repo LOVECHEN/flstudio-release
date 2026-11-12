@@ -42,28 +42,17 @@ jobs:
           LATEST: 'false'
         run: bash .github/scripts/mirror-one.sh
 
-      # 刷新清单，兼作保活（防止定时任务被 GitHub 60 天休眠）
-      - name: Refresh MIRRORED.md manifest (keep-alive)
-        if: always()
-        env:
-          GH_TOKEN: ${{ github.token }}
+      # GitHub 会停用 60 天无活动的公开仓库定时工作流；无需维护版本清单。
+      - name: Keep scheduled workflow active
+        if: always() && github.event_name == 'schedule'
         run: |
           set -euo pipefail
-          {
-            echo "# 已归档版本"
-            echo
-            echo "> 由 mirror workflow 自动刷新 · $(date -u '+%Y-%m-%d %H:%M UTC')"
-            echo
-            echo "| 平台 | 标题 | tag | 发布(UTC) |"
-            echo "|---|---|---|---|"
-            gh release list -R "$GITHUB_REPOSITORY" --limit 300 --json tagName,name,createdAt \
-              --jq 'sort_by(.tagName)|reverse|.[]|"| \(.tagName|split("-")[0]) | \(.name) | \(.tagName) | \(.createdAt[0:16]|sub("T";" ")) |"'
-          } > MIRRORED.md
-          git add MIRRORED.md
-          if git diff --cached --quiet -- MIRRORED.md; then   # 含首次未跟踪文件的判定
-            echo "MIRRORED.md 无变化"
-          else
-            git config user.name  "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git commit -m "chore: refresh mirrored manifest" && git push
+          last_commit=$(git log -1 --format=%ct)
+          now=$(date -u +%s)
+          if (( now - last_commit < 30 * 24 * 60 * 60 )); then
+            exit 0
           fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit --allow-empty -m "chore: keep mirror schedule active"
+          git push
