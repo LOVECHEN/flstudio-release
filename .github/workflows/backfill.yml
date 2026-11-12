@@ -1,0 +1,54 @@
+name: backfill
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'probe: HEAD only; publish: fetch official packages into Releases'
+        type: choice
+        options: [probe, publish]
+        default: probe
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mirror
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        track: [mac, win]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch available official historical installers
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REDIRECT: ${{ matrix.track == 'mac' && secrets.REDIRECT_MAC || secrets.REDIRECT_WIN }}
+          TRACK: ${{ matrix.track }}
+          MODE: ${{ inputs.mode }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$TRACK" = mac ]; then
+            export PLATFORM=macOS
+            versions=(26.1.5.5384 26.1.4.5356 26.1.3.5336 26.1.2.5323 26.1.1.5313 26.1.0.5294 25.2.5.5055 25.2.4.4960 25.1.6.4669 25.1.5.4642 25.1.1.4551 24.2.2.4259 24.2.0.4161 24.1.2.4074 21.2.3.3586 21.1.1.3352 21.0.3.3036 20.9.2.2670 20.8.3.1574)
+          else
+            export PLATFORM='Windows x64'
+            versions=(26.1.5.5618 26.1.5.5613 26.1.4.5589 26.1.3.5570 26.1.2.5557 26.1.1.5547 26.1.0.5530 25.2.5.5319 25.2.4.5242 25.1.6.4997 25.1.5.4976 25.1.1.4879 24.2.2.4597 24.2.0.4503 24.1.2.4430 21.2.3.4004 21.1.1.3750 21.0.3.3517 20.9.2.2963 20.8.4.2576 20.6.2.1549)
+          fi
+          export LATEST=false PROBE_ONLY=true
+          [ "$MODE" != publish ] || export PROBE_ONLY=false
+          failed=0
+          for version in "${versions[@]}"; do
+            if ! VERSION="$version" bash .github/scripts/mirror-one.sh; then
+              echo "::error::failed $TRACK-$version"
+              failed=1
+            fi
+          done
+          exit "$failed"

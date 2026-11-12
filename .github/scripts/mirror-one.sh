@@ -6,10 +6,15 @@
 #   PLATFORM  展示用平台名（macOS | Windows x64）
 #   LATEST    该轨新建的 Release 是否标记为 /releases/latest（true|false）
 #   GH_TOKEN  github.token（gh 用）
+#   VERSION   可选：补抓指定旧版本，仅从现有官方源探测，不覆盖 Latest
+#   PROBE_ONLY 可选：true 时只探测旧版本，不下载或发布
 set -euo pipefail
 
 : "${REDIRECT:?缺少 REDIRECT（检查仓库 Secret REDIRECT_MAC / REDIRECT_WIN 是否已配置）}"
 : "${TRACK:?}"; : "${PLATFORM:?}"; : "${LATEST:=false}"
+: "${VERSION:=}"; : "${PROBE_ONLY:=false}"
+[[ "$TRACK" = mac || "$TRACK" = win ]] || { echo "无效轨名"; exit 1; }
+[[ -z "$VERSION" || "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "无效版本号"; exit 1; }
 repo="$GITHUB_REPOSITORY"
 UA='Mozilla/5.0'
 
@@ -34,6 +39,35 @@ mask "$REDIRECT"            # 源 redirect（GitHub 已按 secret 打码，这�
 #    拿到后立刻打码，后续 curl 报错里的直链也会被 *** 掉。
 eff="$(curl -fsSL -I -o /dev/null -A "$UA" -w '%{url_effective}' "$REDIRECT")"
 mask "$eff"
+if [ -n "$VERSION" ]; then
+  LATEST=false
+  base="${eff%/*}"
+  if [ "$TRACK" = mac ]; then
+    candidates=("flstudio_mac_${VERSION}.dmg" "flstudio_mac_${VERSION}-ONLINE.dmg" "flstudio_mac_${VERSION}.zip")
+  else
+    candidates=("flstudio_win64_${VERSION}.exe" "flstudio_win64_${VERSION}_ONLINE.exe" "flstudio_win_${VERSION}.exe" "flstudio_win64_${VERSION}.zip")
+  fi
+  found=
+  for candidate in "${candidates[@]}"; do
+    url="$base/$candidate"
+    mask "$url"
+    # 响应只进变量；不打印源 URL、重定向或服务器错误正文。
+    if response=$(curl -sSL -I --max-time 45 -o /dev/null -A "$UA" -w '%{http_code} %{url_effective}' "$url" 2>/dev/null); then
+      status="${response%% *}"
+      final="${response#* }"
+      mask "$final"
+      if [ "$status" = 200 ] && [ "${final##*/}" = "$candidate" ]; then
+        eff="$final"; found=1; break
+      fi
+    fi
+  done
+  if [ -z "$found" ]; then
+    echo "unavailable $TRACK-$VERSION"
+    exit 0
+  fi
+  echo "available $TRACK-$VERSION file=${eff##*/}"
+  [ "$PROBE_ONLY" != true ] || exit 0
+fi
 file="$(basename "$eff")"
 ver="$(printf '%s' "$file" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
 [ -n "$ver" ] || { echo "无法解析版本号（源不可达或格式变化），异常退出"; exit 1; }
@@ -44,8 +78,12 @@ tag="${TRACK}-${ver}"
 echo "轨=$TRACK 版本=$ver"   # 只记录版本，不回显任何 URL
 
 # 2) 已归档则跳过
-if gh release view "$tag" -R "$repo" >/dev/null 2>&1; then
-  echo "skip $tag（已存在）"; exit 0
+release_exists=false
+if release=$(gh release view "$tag" -R "$repo" --json isDraft,assets 2>/dev/null); then
+  if [ "$(printf '%s' "$release" | jq -r '.isDraft')" = false ]; then
+    echo "skip $tag（已发布）"; exit 0
+  fi
+  release_exists=true
 fi
 
 # 3) 下载官方原版（断点续传 + 重试）
@@ -54,6 +92,11 @@ curl -fL --retry 6 --retry-delay 10 --retry-all-errors -C - -A "$UA" -o "$file" 
 sz="$(stat -c%s "$file" 2>/dev/null || stat -f%z "$file")"
 echo "大小 $sz 字节"
 [ "$sz" -gt 100000000 ] || { echo "文件异常小（$sz），疑似下载失败"; exit 1; }
+case "$file" in
+  *.exe) [ "$(head -c 2 "$file")" = MZ ] || { echo "不是有效 EXE"; exit 1; } ;;
+  *.dmg) [ "$(tail -c 512 "$file" | head -c 4)" = koly ] || { echo "不是有效 DMG"; exit 1; } ;;
+  *.zip) unzip -tq "$file" >/dev/null || { echo "ZIP 校验失败"; exit 1; } ;;
+esac
 sha256sum "$file" > SHA256SUMS.txt
 echo "::endgroup::"
 
@@ -63,15 +106,18 @@ notes="$(printf '## FL Studio %s · %s\n\n| | |\n|---|---|\n| **产品** | FL St
 
 latest_flag="--latest=false"; [ "$LATEST" = "true" ] && latest_flag="--latest=true"
 
-# 5) 两阶段发布：先建空 Release，再带重试上传大资产（1GB+ 上传偶发抖动）
-gh release create "$tag" -R "$repo" \
-  --title "$PLATFORM · FL Studio $ver" --notes "$notes" $latest_flag
+# 5) 先创建草稿，上传完整后再发布；失败重跑可以续传，不留下已发布的空包。
+if [ "$release_exists" = false ]; then
+  gh release create "$tag" -R "$repo" --draft \
+    --title "$PLATFORM · FL Studio $ver" --notes "$notes" --latest=false
+fi
 ok=
 for i in 1 2 3 4 5; do
   if gh release upload "$tag" "$file" SHA256SUMS.txt --clobber -R "$repo"; then ok=1; break; fi
   echo "上传失败，第 $i 次重试…"; sleep 20
 done
 [ -n "$ok" ] || { echo "资产上传多次失败"; exit 1; }
+gh release edit "$tag" -R "$repo" --draft=false $latest_flag
 
 rm -f "$file" SHA256SUMS.txt
 echo "created $tag"
