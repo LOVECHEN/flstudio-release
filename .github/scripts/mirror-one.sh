@@ -81,7 +81,7 @@ echo "轨=$TRACK 版本=$ver"   # 只记录版本，不回显任何 URL
 release_exists=false
 if release=$(gh release view "$tag" -R "$repo" --json isDraft,assets 2>/dev/null); then
   if [ "$(printf '%s' "$release" | jq -r '.isDraft')" = false ]; then
-    echo "skip $tag（已发布）"; exit 0
+    echo "skip ${tag}（已发布）"; exit 0
   fi
   release_exists=true
 fi
@@ -91,7 +91,7 @@ echo "::group::下载 $file"
 curl -fL --retry 6 --retry-delay 10 --retry-all-errors -C - -A "$UA" -o "$file" "$eff"
 sz="$(stat -c%s "$file" 2>/dev/null || stat -f%z "$file")"
 echo "大小 $sz 字节"
-[ "$sz" -gt 100000000 ] || { echo "文件异常小（$sz），疑似下载失败"; exit 1; }
+[ "$sz" -gt 100000000 ] || { echo "文件异常小（${sz}），疑似下载失败"; exit 1; }
 case "$file" in
   *.exe) [ "$(head -c 2 "$file")" = MZ ] || { echo "不是有效 EXE"; exit 1; } ;;
   *.dmg) [ "$(tail -c 512 "$file" | head -c 4)" = koly ] || { echo "不是有效 DMG"; exit 1; } ;;
