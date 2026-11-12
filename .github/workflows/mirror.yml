@@ -1,0 +1,58 @@
+name: mirror
+
+on:
+  schedule:
+    - cron: '23 */6 * * *'   # 每 6 小时检查官方安装器重定向
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mirror
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 官方安装器是「稳定重定向 → 带版本号的直链」，HEAD 跟随重定向即可白嫖版本号，
+      # 无需下载 1GB 正文。mac / win 各自独立 build 号，按 tag 前缀分轨。
+      # 两条 redirect 源 URL 存放在仓库 Secret（REDIRECT_MAC / REDIRECT_WIN），不写进仓库。
+
+      - name: Mirror · macOS (dmg)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REDIRECT: ${{ secrets.REDIRECT_MAC }}
+          TRACK: mac
+          PLATFORM: macOS
+          LATEST: 'true'          # /releases/latest 指向最新 macOS 版
+        run: bash .github/scripts/mirror-one.sh
+
+      - name: Mirror · Windows (exe)
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REDIRECT: ${{ secrets.REDIRECT_WIN }}
+          TRACK: win
+          PLATFORM: Windows x64
+          LATEST: 'false'
+        run: bash .github/scripts/mirror-one.sh
+
+      # GitHub 会停用 60 天无活动的公开仓库定时工作流；无需维护版本清单。
+      - name: Keep scheduled workflow active
+        if: always() && github.event_name == 'schedule'
+        run: |
+          set -euo pipefail
+          last_commit=$(git log -1 --format=%ct)
+          now=$(date -u +%s)
+          if (( now - last_commit < 30 * 24 * 60 * 60 )); then
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit --allow-empty -m "chore: keep mirror schedule active"
+          git push
